@@ -43,6 +43,9 @@ jobs:
           echo "Checking row count in 'tokens' table:"
           psql "$DB_URL" -c "SELECT count(*) FROM tokens;" || echo "⚠️ Could not query tokens table"
 
+          echo "Checking row count in 'channels' table (Upstream keys):"
+          psql "$DB_URL" -c "SELECT count(*) FROM channels;" || echo "⚠️ Could not query channels table"
+
       - name: Create Backup (Compressed)
         env:
           DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
@@ -57,7 +60,8 @@ jobs:
           # 1. 导出 SQL (带清理逻辑)
           # 2. 管道传递给 gzip 压缩 (-9 表示最高压缩比)
           # 3. 写入文件
-          pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists | gzip -9 > "$FILENAME"
+          # 增加 --verbose 以便在日志中看到导出进度
+          pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists --verbose | gzip -9 > "$FILENAME"
 
           echo "✅ Backup created successfully: $FILENAME"
 
