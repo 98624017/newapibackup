@@ -23,8 +23,12 @@ jobs:
           #由于 Postgres 17 较新，Ubuntu 默认源可能没有，需手动添加官方源
           sudo apt-get install -y postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          # 2. 安装 Client 17
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
+
+          # 3. 关键：将 17 版本的路径加到环境 PATH 最前面，强制替换默认版本
+          echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
       - name: Create Backup (Compressed)
         env:
