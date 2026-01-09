@@ -19,8 +19,12 @@ jobs:
 
       - name: Install PostgreSQL Client
         run: |
+
+          #由于 Postgres 17 较新，Ubuntu 默认源可能没有，需手动添加官方源
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client-17
 
       - name: Create Backup (Compressed)
         env:
