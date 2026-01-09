@@ -1,0 +1,63 @@
+name: Database Backup to R2 (AWS CLI + Gzip)
+
+on:
+  schedule:
+    # 北京时间 12:00 和 00:00 运行
+    - cron: '0 4,16 * * *'
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      # 强制整个环境使用上海时间
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL Client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Create Backup (Compressed)
+        env:
+          DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
+        run: |
+          # 遇到错误立即停止，防止上传坏文件
+          set -euo pipefail
+
+          # 文件名后缀改为 .sql.gz
+          FILENAME="backup-$(date +'%Y%m%d-%H%M%S').sql.gz"
+          echo "BACKUP_FILENAME=$FILENAME" >> $GITHUB_ENV
+
+          # 1. 导出 SQL (带清理逻辑)
+          # 2. 管道传递给 gzip 压缩 (-9 表示最高压缩比)
+          # 3. 写入文件
+          pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists | gzip -9 > "$FILENAME"
+
+          echo "✅ Backup created successfully: $FILENAME"
+
+      - name: Upload to R2 using AWS CLI
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+
+          YEAR=$(date +'%Y')
+          MONTH=$(date +'%m')
+          S3_PATH="s3://${BUCKET_NAME}/${YEAR}/${MONTH}/${{ env.BACKUP_FILENAME }}"
+
+          aws s3 cp "${{ env.BACKUP_FILENAME }}" "$S3_PATH" --endpoint-url "$R2_ENDPOINT"
+
+          echo "🚀 Backup uploaded to: $S3_PATH"
+
+      - name: Cleanup Local File
+        run: rm -f "${{ env.BACKUP_FILENAME }}"
