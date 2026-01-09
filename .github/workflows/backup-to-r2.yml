@@ -1,4 +1,4 @@
-name: Database Backup to R2 (AWS CLI + Gzip)
+name: Database Backup to R2 (Multi-DB Support)
 
 on:
   schedule:
@@ -19,54 +19,21 @@ jobs:
 
       - name: Install PostgreSQL Client
         run: |
-
           #由于 Postgres 17 较新，Ubuntu 默认源可能没有，需手动添加官方源
           sudo apt-get install -y postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           # 2. 安装 Client 17
           sudo apt-get update
           sudo apt-get install -y postgresql-client-17
-
+          
           # 3. 关键：将 17 版本的路径加到环境 PATH 最前面，强制替换默认版本
           echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
-      - name: 🔍 Debug Database Content (Check if tables exist)
+      - name: Process Multiple Databases
         env:
-          DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
-        run: |
-          echo "Checking database connectivity and content..."
-          # 列出所有表
-          psql "$DB_URL" -c "\dt"
-          
-          # 尝试查询是否有数据 (假设有 tokens 表，没有会报错但能帮我们诊断)
-          # || true 保证即使查询失败也不中断流程
-          echo "Checking row count in 'tokens' table:"
-          psql "$DB_URL" -c "SELECT count(*) FROM tokens;" || echo "⚠️ Could not query tokens table"
-
-          echo "Checking row count in 'channels' table (Upstream keys):"
-          psql "$DB_URL" -c "SELECT count(*) FROM channels;" || echo "⚠️ Could not query channels table"
-
-      - name: Create Backup (Compressed)
-        env:
-          DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
-        run: |
-          # 遇到错误立即停止，防止上传坏文件
-          set -euo pipefail
-
-          # 文件名后缀改为 .sql.gz
-          FILENAME="backup-$(date +'%Y%m%d-%H%M%S').sql.gz"
-          echo "BACKUP_FILENAME=$FILENAME" >> $GITHUB_ENV
-
-          # 1. 导出 SQL (带清理逻辑)
-          # 2. 管道传递给 gzip 压缩 (-9 表示最高压缩比)
-          # 3. 写入文件
-          # 增加 --verbose 以便在日志中看到导出进度
-          pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists --verbose | gzip -9 > "$FILENAME"
-
-          echo "✅ Backup created successfully: $FILENAME"
-
-      - name: Upload to R2 using AWS CLI
-        env:
+          # JSON 格式: [{"name": "db1", "url": "postgres://..."}, {"name": "db2", "url": "..."}]
+          DB_BACKUP_CONFIG: ${{ secrets.DB_BACKUP_CONFIG }}
+          # R2 配置
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
@@ -74,15 +41,70 @@ jobs:
           R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
-          set -euo pipefail
+          set -e
+          
+          # 检查配置是否存在
+          if [ -z "$DB_BACKUP_CONFIG" ]; then
+            echo "❌ Error: DB_BACKUP_CONFIG secret is empty."
+            exit 1
+          fi
 
+          # 准备上传路径变量
           YEAR=$(date +'%Y')
           MONTH=$(date +'%m')
-          S3_PATH="s3://${BUCKET_NAME}/${YEAR}/${MONTH}/${{ env.BACKUP_FILENAME }}"
+          DATE_STR=$(date +'%Y%m%d-%H%M%S')
+          
+          # 错误标记
+          HAS_ERROR=false
 
-          aws s3 cp "${{ env.BACKUP_FILENAME }}" "$S3_PATH" --endpoint-url "$R2_ENDPOINT"
-
-          echo "🚀 Backup uploaded to: $S3_PATH"
-
-      - name: Cleanup Local File
-        run: rm -f "${{ env.BACKUP_FILENAME }}"
+          echo "Starting multi-database backup process..."
+          
+          # 使用 jq 解析 JSON 并循环处理
+          # 注意：Base64 编码由 jq 处理可能太复杂，直接循环读取
+          # 为了处理特殊字符，使用 jq -c 输出每一行 compact JSON
+          echo "$DB_BACKUP_CONFIG" | jq -c '.[]' | while read -r db_item; do
+            # 解析 name 和 url
+            DB_NAME=$(echo "$db_item" | jq -r '.name')
+            DB_URL=$(echo "$db_item" | jq -r '.url')
+            
+            if [ -z "$DB_NAME" ] || [ -z "$DB_URL" ]; then
+              echo "⚠️  Skipping invalid config item: $db_item"
+              continue
+            fi
+            
+            FILENAME="${DB_NAME}-backup-${DATE_STR}.sql.gz"
+            S3_PATH="s3://${BUCKET_NAME}/${YEAR}/${MONTH}/${FILENAME}"
+            
+            echo "---------------------------------------------------"
+            echo "🗄️  Processing database: $DB_NAME"
+            echo "📄 Target filename: $FILENAME"
+            
+            # 使用子 shell 执行备避免环境变量污染，允许单个失败继续
+            (
+              set -o pipefail
+              # 备份并压缩
+              pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists | gzip -9 > "$FILENAME"
+              
+              # 上传
+              aws s3 cp "$FILENAME" "$S3_PATH" --endpoint-url "$R2_ENDPOINT"
+              
+              echo "✅ Backup success for $DB_NAME"
+              
+              # 清理
+              rm -f "$FILENAME"
+            ) || {
+              echo "❌ Backup FAILED for $DB_NAME"
+              HAS_ERROR=true
+            }
+            
+          done
+          
+          # 如果有任何一个失败，最终让步骤失败，以便发送通知（如果配置了的话）
+          if [ "$HAS_ERROR" = true ]; then
+            echo "---------------------------------------------------"
+            echo "❌ One or more backups failed."
+            exit 1
+          else
+            echo "---------------------------------------------------"
+            echo "🎉 All backups completed successfully."
+          fi
