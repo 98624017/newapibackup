@@ -30,6 +30,19 @@ jobs:
           # 3. 关键：将 17 版本的路径加到环境 PATH 最前面，强制替换默认版本
           echo "/usr/lib/postgresql/17/bin" >> $GITHUB_PATH
 
+      - name: 🔍 Debug Database Content (Check if tables exist)
+        env:
+          DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
+        run: |
+          echo "Checking database connectivity and content..."
+          # 列出所有表
+          psql "$DB_URL" -c "\dt"
+          
+          # 尝试查询是否有数据 (假设有 tokens 表，没有会报错但能帮我们诊断)
+          # || true 保证即使查询失败也不中断流程
+          echo "Checking row count in 'tokens' table:"
+          psql "$DB_URL" -c "SELECT count(*) FROM tokens;" || echo "⚠️ Could not query tokens table"
+
       - name: Create Backup (Compressed)
         env:
           DB_URL: ${{ secrets.DB_CONNECTION_STRING }}
