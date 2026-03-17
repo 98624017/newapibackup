@@ -33,20 +33,102 @@ jobs:
         env:
           # JSON 格式: [{"name": "db1", "url": "postgres://..."}, {"name": "db2", "url": "..."}]
           DB_BACKUP_CONFIG: ${{ secrets.DB_BACKUP_CONFIG }}
-          # R2 配置
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          # 上传目标：primary / secondary / both（可选）
+          # 推荐用 Actions Variables 配置（非敏感），Secrets 也可（secret: R2_UPLOAD_TARGETS）
+          R2_UPLOAD_TARGETS: ${{ vars.R2_UPLOAD_TARGETS }}
+          R2_UPLOAD_TARGETS_SECRET: ${{ secrets.R2_UPLOAD_TARGETS }}
+
+          # Primary R2（保持兼容：沿用现有 secrets）
+          R2_PRIMARY_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_PRIMARY_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PRIMARY_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_PRIMARY_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+          # Secondary R2（新增：第二账号 secrets）
+          R2_SECONDARY_ACCESS_KEY_ID: ${{ secrets.R2_2_ACCESS_KEY_ID }}
+          R2_SECONDARY_SECRET_ACCESS_KEY: ${{ secrets.R2_2_SECRET_ACCESS_KEY }}
+          R2_SECONDARY_ACCOUNT_ID: ${{ secrets.R2_2_ACCOUNT_ID }}
+          R2_SECONDARY_BUCKET_NAME: ${{ secrets.R2_2_BUCKET_NAME }}
+
           AWS_DEFAULT_REGION: auto
           AWS_EC2_METADATA_DISABLED: "true"
-          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           set -e
+          set -o pipefail
           
           # 检查配置是否存在
-          if [ -z "$DB_BACKUP_CONFIG" ]; then
+          if [ -z "${DB_BACKUP_CONFIG:-}" ]; then
             echo "❌ Error: DB_BACKUP_CONFIG secret is empty."
             exit 1
+          fi
+
+          require_env() {
+            local env_name="$1"
+            if [ -z "${!env_name:-}" ]; then
+              echo "❌ Error: required env var is empty: ${env_name}"
+              exit 1
+            fi
+          }
+
+          PRIMARY_READY=false
+          SECONDARY_READY=false
+
+          ensure_primary_config() {
+            if [ "$PRIMARY_READY" = true ]; then
+              return 0
+            fi
+
+            require_env R2_PRIMARY_ACCESS_KEY_ID
+            require_env R2_PRIMARY_SECRET_ACCESS_KEY
+            require_env R2_PRIMARY_ACCOUNT_ID
+            require_env R2_PRIMARY_BUCKET_NAME
+            R2_ENDPOINT_PRIMARY="https://${R2_PRIMARY_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+            PRIMARY_READY=true
+          }
+
+          ensure_secondary_config() {
+            if [ "$SECONDARY_READY" = true ]; then
+              return 0
+            fi
+
+            require_env R2_SECONDARY_ACCESS_KEY_ID
+            require_env R2_SECONDARY_SECRET_ACCESS_KEY
+            require_env R2_SECONDARY_ACCOUNT_ID
+            require_env R2_SECONDARY_BUCKET_NAME
+            R2_ENDPOINT_SECONDARY="https://${R2_SECONDARY_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+            SECONDARY_READY=true
+          }
+
+          # 读取上传目标（优先 Variable，其次 Secret；都没有则按是否配置 secondary 决定默认值）
+          UPLOAD_TARGETS="${R2_UPLOAD_TARGETS:-}"
+          if [ -z "$UPLOAD_TARGETS" ]; then
+            UPLOAD_TARGETS="${R2_UPLOAD_TARGETS_SECRET:-}"
+          fi
+          if [ -z "$UPLOAD_TARGETS" ]; then
+            if [ -n "${R2_SECONDARY_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECONDARY_SECRET_ACCESS_KEY:-}" ] \
+              && [ -n "${R2_SECONDARY_ACCOUNT_ID:-}" ] && [ -n "${R2_SECONDARY_BUCKET_NAME:-}" ]; then
+              UPLOAD_TARGETS="both"
+            else
+              UPLOAD_TARGETS="primary"
+            fi
+          fi
+
+          case "$UPLOAD_TARGETS" in
+            primary|secondary|both) ;;
+            *)
+              echo "❌ Error: invalid R2_UPLOAD_TARGETS='$UPLOAD_TARGETS' (allowed: primary|secondary|both)"
+              exit 1
+              ;;
+          esac
+
+          # 预校验默认目标的必要配置（按 DB 级 targets 覆盖时会按需再校验）
+          if [ "$UPLOAD_TARGETS" = "primary" ] || [ "$UPLOAD_TARGETS" = "both" ]; then
+            ensure_primary_config
+          fi
+          if [ "$UPLOAD_TARGETS" = "secondary" ] || [ "$UPLOAD_TARGETS" = "both" ]; then
+            ensure_secondary_config
           fi
 
           # 准备上传路径变量
@@ -57,47 +139,96 @@ jobs:
           # 错误标记
           HAS_ERROR=false
 
-          echo "Starting multi-database backup process..."
+          # JSON 基本校验：必须是数组
+          if ! echo "$DB_BACKUP_CONFIG" | jq -e 'type == "array"' >/dev/null; then
+            echo "❌ Error: DB_BACKUP_CONFIG must be a JSON array."
+            exit 1
+          fi
+
+          DB_COUNT=$(echo "$DB_BACKUP_CONFIG" | jq -r 'length')
+          echo "Starting multi-database backup process... (count=${DB_COUNT}, targets=${UPLOAD_TARGETS})"
           
           # 使用 jq 解析 JSON 并循环处理
           # 注意：Base64 编码由 jq 处理可能太复杂，直接循环读取
           # 为了处理特殊字符，使用 jq -c 输出每一行 compact JSON
-          echo "$DB_BACKUP_CONFIG" | jq -c '.[]' | while read -r db_item; do
+          while IFS= read -r db_item; do
             # 解析 name 和 url
-            DB_NAME=$(echo "$db_item" | jq -r '.name')
-            DB_URL=$(echo "$db_item" | jq -r '.url')
-            
+            DB_NAME=$(echo "$db_item" | jq -r '.name // empty')
+            DB_URL=$(echo "$db_item" | jq -r '.url // empty')
+            DB_TARGETS=$(echo "$db_item" | jq -r '.targets // empty')
+
             if [ -z "$DB_NAME" ] || [ -z "$DB_URL" ]; then
-              echo "⚠️  Skipping invalid config item: $db_item"
+              echo "⚠️  Skipping invalid config item (missing name/url)."
               continue
             fi
+
+            # 每个数据库可选覆盖 targets：primary|secondary|both
+            if [ -z "$DB_TARGETS" ]; then
+              DB_TARGETS="$UPLOAD_TARGETS"
+            else
+              DB_TARGETS=$(echo "$DB_TARGETS" | tr '[:upper:]' '[:lower:]' | xargs)
+            fi
+            case "$DB_TARGETS" in
+              primary|secondary|both) ;;
+              *)
+                echo "❌ Invalid targets for $DB_NAME: '$DB_TARGETS' (allowed: primary|secondary|both)"
+                HAS_ERROR=true
+                continue
+                ;;
+            esac
             
             FILENAME="${DB_NAME}-backup-${DATE_STR}.sql.gz"
-            S3_PATH="s3://${BUCKET_NAME}/${YEAR}/${MONTH}/${FILENAME}"
             
             echo "---------------------------------------------------"
             echo "🗄️  Processing database: $DB_NAME"
             echo "📄 Target filename: $FILENAME"
+            echo "🎯 Upload targets: $DB_TARGETS"
             
-            # 使用子 shell 执行备避免环境变量污染，允许单个失败继续
-            (
-              set -o pipefail
-              # 备份并压缩
-              pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists | gzip -9 > "$FILENAME"
-              
-              # 上传
-              aws s3 cp "$FILENAME" "$S3_PATH" --endpoint-url "$R2_ENDPOINT"
-              
-              echo "✅ Backup success for $DB_NAME"
-              
-              # 清理
-              rm -f "$FILENAME"
-            ) || {
-              echo "❌ Backup FAILED for $DB_NAME"
+            # 先生成一次 dump，再按目标上传；任意目标成功即算成功
+            if ! (pg_dump "$DB_URL" --format=plain --no-owner --no-acl --clean --if-exists | gzip -9 > "$FILENAME"); then
+              echo "❌ Dump FAILED for $DB_NAME"
               HAS_ERROR=true
-            }
+              rm -f "$FILENAME"
+              continue
+            fi
+
+            ANY_UPLOAD_OK=false
+
+            if [ "$DB_TARGETS" = "primary" ] || [ "$DB_TARGETS" = "both" ]; then
+              ensure_primary_config
+              S3_PATH_PRIMARY="s3://${R2_PRIMARY_BUCKET_NAME}/${YEAR}/${MONTH}/${FILENAME}"
+              if AWS_ACCESS_KEY_ID="$R2_PRIMARY_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_PRIMARY_SECRET_ACCESS_KEY" \
+                aws s3 cp "$FILENAME" "$S3_PATH_PRIMARY" --endpoint-url "$R2_ENDPOINT_PRIMARY"; then
+                echo "✅ Upload success (primary) for $DB_NAME"
+                ANY_UPLOAD_OK=true
+              else
+                echo "⚠️  Upload failed (primary) for $DB_NAME"
+              fi
+            fi
+
+            if [ "$DB_TARGETS" = "secondary" ] || [ "$DB_TARGETS" = "both" ]; then
+              ensure_secondary_config
+              S3_PATH_SECONDARY="s3://${R2_SECONDARY_BUCKET_NAME}/${YEAR}/${MONTH}/${FILENAME}"
+              if AWS_ACCESS_KEY_ID="$R2_SECONDARY_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$R2_SECONDARY_SECRET_ACCESS_KEY" \
+                aws s3 cp "$FILENAME" "$S3_PATH_SECONDARY" --endpoint-url "$R2_ENDPOINT_SECONDARY"; then
+                echo "✅ Upload success (secondary) for $DB_NAME"
+                ANY_UPLOAD_OK=true
+              else
+                echo "⚠️  Upload failed (secondary) for $DB_NAME"
+              fi
+            fi
+
+            # 清理本地文件（无论上传是否成功）
+            rm -f "$FILENAME"
+
+            if [ "$ANY_UPLOAD_OK" = true ]; then
+              echo "✅ Backup success for $DB_NAME (at least one target uploaded)"
+            else
+              echo "❌ Upload FAILED for $DB_NAME (all selected targets failed)"
+              HAS_ERROR=true
+            fi
             
-          done
+          done < <(echo "$DB_BACKUP_CONFIG" | jq -c '.[]')
           
           # 如果有任何一个失败，最终让步骤失败，以便发送通知（如果配置了的话）
           if [ "$HAS_ERROR" = true ]; then

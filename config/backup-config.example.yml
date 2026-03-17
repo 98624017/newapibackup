@@ -1,0 +1,30 @@
+# Copy to `config/backup-config.local.yml` (ignored by git) and fill in values.
+# Then apply to GitHub Actions using `python scripts/apply-gh-actions-config.py --config config/backup-config.local.yml`.
+
+# Optional. If omitted, the script will try to detect from `git remote origin`.
+repo: 98624017/newapibackup
+
+variables:
+  # Global default upload targets for databases WITHOUT per-item `targets`.
+  # Allowed: primary | secondary | both
+  R2_UPLOAD_TARGETS: both
+
+secrets:
+  # Secondary R2 account/bucket (optional unless any database targets secondary/both)
+  R2_2_ACCESS_KEY_ID: "..."
+  R2_2_SECRET_ACCESS_KEY: "..."
+  R2_2_ACCOUNT_ID: "..."
+  R2_2_BUCKET_NAME: "..."
+
+  # Databases to back up (required)
+  # Per database, `targets` is optional and overrides the global default:
+  # - old db -> both
+  # - new db -> primary
+  DB_BACKUP_CONFIG:
+    - name: old-db
+      url: "postgres://user:password@host:5432/old_db"
+      targets: both
+    - name: new-db
+      url: "postgres://user:password@host:5432/new_db"
+      targets: primary
+

@@ -1,0 +1,11 @@
+# Local config (contains secrets)
+config/backup-config.local.yml
+config/backup-config.local.yaml
+config/backup-config.local.json
+
+# Local dumps (if you test locally)
+*.sql.gz
+
+# Python cache
+__pycache__/
+*.pyc
