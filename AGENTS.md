@@ -5,6 +5,8 @@
 - `.github/workflows/backup-to-r2.yml`: the primary GitHub Actions workflow. It runs scheduled/manual PostgreSQL
   backups, compresses dumps (`*.sql.gz`), and uploads them to Cloudflare R2 via the S3 API (optionally to a
   secondary R2 account/bucket).
+- `.github/keepalive/backup-heartbeat.json`: updated by the workflow (commit/push) to keep the repo active for
+  scheduled runs in public repos.
 - `.spec-workflow/`: templates used for spec/planning workflows; not required for runtime.
 
 Backups are uploaded under `s3://<bucket>/<YYYY>/<MM>/` (primary: `R2_BUCKET_NAME`, secondary:

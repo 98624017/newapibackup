@@ -9,6 +9,8 @@ on:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       # 强制整个环境使用上海时间
       TZ: Asia/Shanghai
@@ -16,6 +18,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Install PostgreSQL Client
         run: |
@@ -239,3 +244,55 @@ jobs:
             echo "---------------------------------------------------"
             echo "🎉 All backups completed successfully."
           fi
+
+      # 让 public 仓库保持“有活动”，避免 schedule 因长期无活动被 GitHub 自动停用。
+      # 规则：仅当日期或 job 状态变化时提交（通常每天 1 次；极端情况下每天最多 2 次）。
+      - name: Keep Repository Active (Heartbeat Commit)
+        if: always()
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          # 同步到远端最新，避免 push 冲突
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          git reset --hard "origin/$DEFAULT_BRANCH"
+
+          HEARTBEAT_DIR=".github/keepalive"
+          HEARTBEAT_FILE="${HEARTBEAT_DIR}/backup-heartbeat.json"
+
+          mkdir -p "$HEARTBEAT_DIR"
+
+          TODAY="$(date +'%Y-%m-%d')"
+          PREV_DATE=""
+          PREV_STATUS=""
+          if [ -f "$HEARTBEAT_FILE" ]; then
+            PREV_DATE="$(jq -r '.date // empty' "$HEARTBEAT_FILE" 2>/dev/null || true)"
+            PREV_STATUS="$(jq -r '.status // empty' "$HEARTBEAT_FILE" 2>/dev/null || true)"
+          fi
+
+          if [ "$PREV_DATE" = "$TODAY" ] && [ "$PREV_STATUS" = "$JOB_STATUS" ]; then
+            echo "Keepalive: no update needed (date/status unchanged)."
+            exit 0
+          fi
+
+          jq -n \
+            --arg date "$TODAY" \
+            --arg status "$JOB_STATUS" \
+            --arg run_id "$RUN_ID" \
+            --arg run_number "$RUN_NUMBER" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            '{date:$date,status:$status,run_id:$run_id,run_number:$run_number,run_attempt:$run_attempt}' \
+            > "$HEARTBEAT_FILE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$HEARTBEAT_FILE"
+          git commit -m "chore: keepalive (${TODAY}, ${JOB_STATUS})"
+          git push origin "HEAD:$DEFAULT_BRANCH"
