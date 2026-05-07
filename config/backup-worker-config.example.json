@@ -1,0 +1,41 @@
+{
+  "backup_databases": [
+    {
+      "name": "prod-a",
+      "url_env": "PROD_A_DATABASE_URL",
+      "primary_target": "r2-primary-prod-a",
+      "mirror_targets": ["r2-secondary-prod-a"],
+      "schedule_offset_minutes": 0
+    },
+    {
+      "name": "prod-b",
+      "url_env": "PROD_B_DATABASE_URL",
+      "primary_target": "r2-primary-prod-b",
+      "mirror_targets": [],
+      "schedule_offset_minutes": 15
+    }
+  ],
+  "r2_targets": {
+    "r2-primary-prod-a": {
+      "account_env": "R2_PRIMARY_ACCOUNT_ID",
+      "access_key_env": "R2_PRIMARY_ACCESS_KEY_ID",
+      "secret_key_env": "R2_PRIMARY_SECRET_ACCESS_KEY",
+      "bucket_env": "R2_PRIMARY_BUCKET_NAME",
+      "prefix": "prod-a/"
+    },
+    "r2-secondary-prod-a": {
+      "account_env": "R2_SECONDARY_ACCOUNT_ID",
+      "access_key_env": "R2_SECONDARY_ACCESS_KEY_ID",
+      "secret_key_env": "R2_SECONDARY_SECRET_ACCESS_KEY",
+      "bucket_env": "R2_SECONDARY_BUCKET_NAME",
+      "prefix": "prod-a/"
+    },
+    "r2-primary-prod-b": {
+      "account_env": "R2_PRIMARY_ACCOUNT_ID",
+      "access_key_env": "R2_PRIMARY_ACCESS_KEY_ID",
+      "secret_key_env": "R2_PRIMARY_SECRET_ACCESS_KEY",
+      "bucket_env": "R2_PRIMARY_BUCKET_NAME",
+      "prefix": "prod-b/"
+    }
+  }
+}
