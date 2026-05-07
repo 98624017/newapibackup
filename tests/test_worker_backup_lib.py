@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from scripts.worker_backup_lib import dump_json, load_json, sha256_file
+from scripts.worker_backup_lib import R2Target, dump_json, load_config_from_env, load_json, sha256_file
 
 
 def test_sha256_file_hashes_file_contents(tmp_path):
@@ -29,3 +29,28 @@ def test_load_json_rejects_non_object(tmp_path):
 
     with pytest.raises(ValueError, match="must be a JSON object"):
         load_json(path)
+
+
+def test_load_config_from_env_reads_json(monkeypatch):
+    monkeypatch.setenv("BACKUP_CONFIG", '{"backup_databases": [], "r2_targets": {}}')
+
+    assert load_config_from_env("BACKUP_CONFIG") == {"backup_databases": [], "r2_targets": {}}
+
+
+def test_r2_target_builds_prefixed_s3_uri(monkeypatch):
+    monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "secret")
+    target = R2Target(
+        name="primary",
+        account_env="R2_ACCOUNT_ID",
+        access_key_env="R2_ACCESS_KEY_ID",
+        secret_key_env="R2_SECRET_ACCESS_KEY",
+        bucket_env="R2_BUCKET",
+        prefix="prod-a/",
+    )
+
+    assert target.endpoint == "https://acct.r2.cloudflarestorage.com"
+    assert target.s3_uri("full/latest.json") == "s3://bucket/prod-a/full/latest.json"
+    assert target.aws_env()["AWS_ACCESS_KEY_ID"] == "key"
