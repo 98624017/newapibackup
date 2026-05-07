@@ -1,0 +1,35 @@
+name: Mirror R2 Full Backups
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-r2-full
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      BACKUP_WORKER_CONFIG: ${{ secrets.BACKUP_WORKER_CONFIG }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Mirror primary R2 full backups to secondary R2
+        env:
+          R2_PRIMARY_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_PRIMARY_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_PRIMARY_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PRIMARY_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_SECONDARY_ACCOUNT_ID: ${{ secrets.R2_2_ACCOUNT_ID }}
+          R2_SECONDARY_ACCESS_KEY_ID: ${{ secrets.R2_2_ACCESS_KEY_ID }}
+          R2_SECONDARY_SECRET_ACCESS_KEY: ${{ secrets.R2_2_SECRET_ACCESS_KEY }}
+          R2_SECONDARY_BUCKET_NAME: ${{ secrets.R2_2_BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+          python scripts/mirror_r2_full.py --config-env BACKUP_WORKER_CONFIG --max-lag-hours 6

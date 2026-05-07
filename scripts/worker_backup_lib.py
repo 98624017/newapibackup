@@ -34,7 +34,10 @@ def load_config_from_env(env_name: str) -> dict[str, Any]:
     raw = os.environ.get(env_name, "")
     if not raw:
         raise ValueError(f"Missing config env var: {env_name}")
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{env_name} must contain valid JSON.") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{env_name} must be a JSON object.")
     return data
@@ -71,7 +74,11 @@ class R2Target:
         return bucket
 
     def object_key(self, relative_key: str) -> str:
-        return f"{self.prefix.rstrip('/')}/{relative_key.lstrip('/')}"
+        prefix = self.prefix.strip("/")
+        key = relative_key.lstrip("/")
+        if not prefix:
+            return key
+        return f"{prefix}/{key}"
 
     def s3_uri(self, relative_key: str) -> str:
         return f"s3://{self.bucket}/{self.object_key(relative_key)}"

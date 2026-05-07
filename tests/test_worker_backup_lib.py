@@ -37,6 +37,13 @@ def test_load_config_from_env_reads_json(monkeypatch):
     assert load_config_from_env("BACKUP_CONFIG") == {"backup_databases": [], "r2_targets": {}}
 
 
+def test_load_config_from_env_reports_env_name_for_bad_json(monkeypatch):
+    monkeypatch.setenv("BACKUP_CONFIG", "{")
+
+    with pytest.raises(ValueError, match="BACKUP_CONFIG must contain valid JSON"):
+        load_config_from_env("BACKUP_CONFIG")
+
+
 def test_r2_target_builds_prefixed_s3_uri(monkeypatch):
     monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
     monkeypatch.setenv("R2_BUCKET", "bucket")
@@ -54,3 +61,19 @@ def test_r2_target_builds_prefixed_s3_uri(monkeypatch):
     assert target.endpoint == "https://acct.r2.cloudflarestorage.com"
     assert target.s3_uri("full/latest.json") == "s3://bucket/prod-a/full/latest.json"
     assert target.aws_env()["AWS_ACCESS_KEY_ID"] == "key"
+
+
+def test_r2_target_allows_empty_prefix(monkeypatch):
+    monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    target = R2Target(
+        name="primary",
+        account_env="R2_ACCOUNT_ID",
+        access_key_env="R2_ACCESS_KEY_ID",
+        secret_key_env="R2_SECRET_ACCESS_KEY",
+        bucket_env="R2_BUCKET",
+        prefix="",
+    )
+
+    assert target.object_key("full/latest.json") == "full/latest.json"
+    assert target.s3_uri("full/latest.json") == "s3://bucket/full/latest.json"
