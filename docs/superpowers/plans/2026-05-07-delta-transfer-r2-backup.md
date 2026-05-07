@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3 standard library, `pytest`, PostgreSQL client tools (`pg_dump`, `pg_restore`), `xdelta3`, `zstd`, AWS CLI against Cloudflare R2 S3 API, GitHub Actions YAML.
 
+Runtime scripts consume `DELTA_BACKUP_CONFIG` as JSON from an environment variable. YAML is only used by `scripts/apply-gh-actions-config.py` when applying local config to GitHub Actions secrets.
+
 ---
 
 ## Scope Check
@@ -641,8 +643,11 @@ def assert_hash(path: Path, expected: str, label: str) -> None:
 
 The CLI must:
 
-- accept `--config`, `--db-name`, `--staging-run-id`, and `--work-dir`
-- download `manifest.json`
+- accept `--config-env`, `--work-dir`, optional `--db-name`, and optional `--staging-run-id`
+- load `DELTA_BACKUP_CONFIG` JSON from `--config-env`
+- scan each configured database prefix for `staging/*/manifest.json` when `--staging-run-id` is omitted
+- process only the requested database/run when `--db-name` and `--staging-run-id` are provided for manual replay
+- download each selected `manifest.json`
 - validate delta/full mode
 - for delta mode, download and validate base archive, base dump, and delta archive
 - run `xdelta3 -d -s base.dump delta.xdelta rebuilt.dump`
@@ -850,9 +855,20 @@ Create `tests/test_apply_gh_actions_config.py` with tests for:
 ```python
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from scripts.apply_gh_actions_config import _validate_delta_backup_config
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "apply-gh-actions-config.py"
+SPEC = importlib.util.spec_from_file_location("apply_gh_actions_config", MODULE_PATH)
+assert SPEC is not None
+apply_config = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(apply_config)
+
+_validate_delta_backup_config = apply_config._validate_delta_backup_config
 
 
 def test_validate_delta_backup_config_accepts_primary_and_mirror_targets():
@@ -910,7 +926,7 @@ Modify `scripts/apply-gh-actions-config.py` to add `_validate_delta_backup_confi
 - `delta.max_delta_ratio`, when present, is between `0.1` and `1.0`
 - every R2 target declares `account_secret`, `access_key_secret`, `secret_key_secret`, `bucket_secret`, and `prefix`
 
-Update `main()` so if the local YAML has `delta_backup:` it serializes the validated object into a GitHub Actions secret named `DELTA_BACKUP_CONFIG`.
+Update `main()` so if the local YAML has `secrets.DELTA_BACKUP_CONFIG`, it validates that object and serializes it into the GitHub Actions secret named `DELTA_BACKUP_CONFIG`.
 
 - [ ] **Step 3: Update example config**
 
@@ -994,8 +1010,10 @@ The delta-transfer pipeline keeps server egress low while publishing full restor
 Server-side scheduled command:
 
 ```bash
+export DELTA_BACKUP_CONFIG='<json from config/backup-config.local.yml secrets.DELTA_BACKUP_CONFIG>'
+export PROD_A_DATABASE_URL='postgres://user:password@db-host.example.com:5432/prod_a'
 python scripts/create_delta_backup.py \
-  --config config/backup-config.local.yml \
+  --config-env DELTA_BACKUP_CONFIG \
   --db-name prod-a \
   --db-url-env PROD_A_DATABASE_URL \
   --state-root /data/delta-backup-state
@@ -1097,14 +1115,14 @@ CODE PATH COVERAGE TO BUILD
 ```bash
 timeout 60s python -m pytest tests -q
 actionlint .github/workflows/backup-to-r2.yml .github/workflows/delta-backup-publish.yml .github/workflows/delta-backup-mirror.yml
-python scripts/apply-gh-actions-config.py --config config/backup-config.example.yml --dry-run
+python scripts/apply-gh-actions-config.py --config config/backup-config.local.yml --dry-run
 ```
 
 Expected:
 
 - all Python tests pass
 - workflow lint passes
-- config dry-run prints `DELTA_BACKUP_CONFIG` in the secrets list
+- config dry-run with a filled local config prints `DELTA_BACKUP_CONFIG` in the secrets list
 
 ## GSTACK REVIEW REPORT
 
@@ -1112,16 +1130,16 @@ Expected:
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
 | Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | issues_open | 4 plan-interface issues, 0 critical architecture gaps |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 3 | clean | 4 plan-interface issues found and resolved, 0 critical architecture gaps |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
 
-**UNRESOLVED:** 4 plan edits should be applied before implementation.
+**UNRESOLVED:** 0
 
-**VERDICT:** ENG REVIEW HAS PLAN FIXES — architecture is acceptable, but implementation should not start until the CLI/config/test mismatches below are corrected.
+**VERDICT:** ENG REVIEW CLEARED — architecture is acceptable and the plan interfaces are now aligned.
 
 Review findings:
 
-1. `publish_delta_backup.py` interface does not match the workflow. The plan says the CLI accepts `--config`, `--db-name`, and `--staging-run-id`, but the workflow calls only `--config-env` and `--work-dir`; either the script must scan staging objects from config, or the workflow must pass explicit db/run inputs.
-2. `DELTA_BACKUP_CONFIG` config shape is inconsistent. Task 6 says the local YAML may have `delta_backup:`, but the example uses `secrets.DELTA_BACKUP_CONFIG`; pick one shape so `apply-gh-actions-config.py --dry-run` can actually emit the expected secret.
-3. Tests cannot import `scripts.apply_gh_actions_config` while the existing file is named `scripts/apply-gh-actions-config.py`; either load it by file path in tests or add an importable wrapper module.
-4. Server-side config loading is unclear. The README command passes `--config config/backup-config.local.yml`, but the runtime dependency list only installs PyYAML for dev; either make runtime scripts consume JSON from `DELTA_BACKUP_CONFIG` or document/install PyYAML for server use.
+1. Resolved: `publish_delta_backup.py` now uses `--config-env` and scans staging objects by default, matching the scheduled workflow.
+2. Resolved: `DELTA_BACKUP_CONFIG` is consistently represented as `secrets.DELTA_BACKUP_CONFIG`.
+3. Resolved: tests load `scripts/apply-gh-actions-config.py` by file path using `importlib`.
+4. Resolved: server runtime uses JSON from `DELTA_BACKUP_CONFIG`; YAML remains local-only for the apply script.
