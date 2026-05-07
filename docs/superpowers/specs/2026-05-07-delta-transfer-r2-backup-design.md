@@ -126,10 +126,11 @@ delta_zst_size > pending_dump_size * 70% -> 上传 pending.dump.zst
   "created_at": "2026-05-07T14:30:00+08:00",
   "mode": "delta",
   "base_object": "prod-a/full/prod-a-backup-20260507-123000.dump.zst",
-  "base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_dump_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "delta_object": "prod-a/staging/<run-id>/delta.xdelta.zst",
-  "delta_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "result_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "delta_archive_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_dump_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "result_size": 123456789,
   "dump_format": "pg_dump custom -Z0",
   "tools": {
@@ -149,11 +150,19 @@ delta_zst_size > pending_dump_size * 70% -> 上传 pending.dump.zst
   "created_at": "2026-05-07T14:30:00+08:00",
   "mode": "full",
   "full_object": "prod-a/staging/<run-id>/full.dump.zst",
-  "result_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "full_archive_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "result_dump_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "result_size": 123456789,
   "dump_format": "pg_dump custom -Z0"
 }
 ```
+
+校验字段语义：
+
+- `*_archive_sha256`：校验 R2 上的压缩对象，例如 `.dump.zst` 或 `.xdelta.zst`。
+- `*_dump_sha256`：校验解压后的 PostgreSQL custom dump 文件。
+- `result_dump_sha256`：校验 GitHub Actions 重建出的未压缩 full dump。
+- 正式发布后，`latest.json` 必须同时记录正式 `.dump.zst` 的 archive hash 和解压后 dump hash。
 
 ## GitHub Actions 重建与发布
 
@@ -162,17 +171,19 @@ delta_zst_size > pending_dump_size * 70% -> 上传 pending.dump.zst
 1. 读取 staging `manifest.json`。
 2. 如果 `mode=delta`：
    - 下载 `base_object`。
-   - 校验 `base_sha256`。
+   - 校验 `base_archive_sha256`。
+   - 解压 base，并校验 `base_dump_sha256`。
    - 下载并解压 `delta.xdelta.zst`。
-   - 校验 `delta_sha256`。
+   - 校验 `delta_archive_sha256`。
    - 使用 `xdelta3 -d` 重建本次 full dump。
 3. 如果 `mode=full`：
    - 下载并解压 `full.dump.zst`。
 4. 校验重建结果：
-   - `sha256` 必须等于 `result_sha256`。
+   - `sha256` 必须等于 `result_dump_sha256`。
    - 文件大小必须等于 `result_size`。
    - `pg_restore --list` 必须能成功读取。
 5. 校验通过后：
+   - 发布前确认当前 `<db-name>/full/latest.json` 仍指向 manifest 的 `base_object`；如果已经变化，停止发布，避免旧任务覆盖新任务。
    - 将 full dump 用 `zstd` 压缩。
    - 上传到 `<db-name>/full/<filename>.dump.zst`。
    - 更新 `<db-name>/full/latest.json`。
@@ -182,6 +193,8 @@ delta_zst_size > pending_dump_size * 70% -> 上传 pending.dump.zst
    - 不更新 `latest.json`。
    - 保留 staging 供排查。
    - workflow 失败并告警。
+
+每个数据库的发布 workflow 必须设置并发限制：同一 `db` 同一时间只允许一个重建/发布任务运行。不同数据库可以并行。
 
 ## 服务器本地状态
 
@@ -201,7 +214,8 @@ state/<db-name>/
 {
   "db": "prod-a",
   "base_object": "prod-a/full/prod-a-backup-20260507-123000.dump.zst",
-  "base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_dump_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "base_size": 123456789,
   "published_at": "2026-05-07T12:30:00+08:00"
 }
@@ -211,11 +225,23 @@ state/<db-name>/
 
 1. 服务器生成 `pending.dump`。
 2. 上传 staging。
-3. GitHub Actions 发布成功后，服务器确认 `latest.json` 已更新到本次 `result_sha256`。
+3. GitHub Actions 发布成功后，服务器确认 `latest.json` 已更新到本次 `result_dump_sha256`。
 4. 服务器将 `pending.dump` 提升为 `base.dump`，并更新 `state.json`。
 5. 发布失败时不替换 `base.dump`，下一次仍基于上一份已发布成功的 full dump。
 
 这个规则避免出现“服务器已切换基准，但 R2 正式区没有对应 full”的断链问题。
+
+单库 in-flight 规则：
+
+- 每个数据库同一时间只允许一个 staging 任务等待发布。
+- 如果上一轮 staging 尚未发布成功，下一轮调度默认跳过该数据库并告警。
+- 不排队堆积多个 pending dump，也不覆盖已有 `pending.dump`。
+
+首次运行和本地基准丢失规则：
+
+- 如果本地没有 `base.dump`，但 primary R2 存在 `<db-name>/full/latest.json`，服务器先下载该正式 full，校验 archive hash 和 dump hash 后作为 `base.dump`。
+- 如果本地没有 `base.dump`，且 primary R2 不存在 `latest.json`，本次直接走 `mode=full` 的 full staging。
+- 如果 `state.json` 损坏或与 R2 `latest.json` 不一致，以 R2 `latest.json` 为准；校验失败时停止备份并告警。
 
 ## 多数据库配置
 
@@ -347,6 +373,14 @@ pg_restore --clean --if-exists --no-owner --no-acl --dbname="$RESTORE_URL" "<bac
 6. 从发布后的 `.dump.zst` 恢复到临时 PostgreSQL 成功。
 7. 多库错峰不会互相覆盖本地 state 或 R2 prefix。
 8. secondary 镜像只同步正式 full，不同步 staging。
+9. 上一轮 staging 未发布完成时，下一轮调度会跳过该数据库并告警。
+10. 本地 `base.dump` 丢失但 R2 `latest.json` 存在时，能下载并校验正式 full 作为新基准。
+11. 旧的 GitHub Actions 发布任务不会覆盖较新的 `latest.json`。
+
+长期验证：
+
+- 每月或每次修改备份逻辑后，从 primary R2 的正式 full 恢复到临时 PostgreSQL，并执行基础 SQL 校验。
+- secondary 至少每月抽样恢复一次，验证跨账号镜像结果可用。
 
 ## 风险与缓解
 
@@ -373,6 +407,15 @@ pg_restore --clean --if-exists --no-owner --no-acl --dbname="$RESTORE_URL" "<bac
 - staging 保留 7 天。
 - workflow 失败告警。
 - 服务器不切换 base，下一次仍可基于旧 full 重新生成 delta 或 full。
+- 同一数据库发布 workflow 加并发限制，并在更新 `latest.json` 前校验当前基准仍匹配 manifest。
+
+### 本地基准文件丢失或状态损坏
+
+服务器本地只保留少量状态文件，因此需要能从 R2 正式区恢复基准。缓解方式：
+
+- R2 `latest.json` 是权威基准。
+- 本地 `state.json` 与 R2 不一致时，以 R2 为准重新下载正式 full。
+- 重新下载后的 full 必须同时通过 archive hash、dump hash 和 `pg_restore --list` 校验。
 
 ### R2 正式区存储量仍按完整备份增长
 
