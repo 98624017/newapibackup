@@ -1105,3 +1105,23 @@ Expected:
 - all Python tests pass
 - workflow lint passes
 - config dry-run prints `DELTA_BACKUP_CONFIG` in the secrets list
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | issues_open | 4 plan-interface issues, 0 critical architecture gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+
+**UNRESOLVED:** 4 plan edits should be applied before implementation.
+
+**VERDICT:** ENG REVIEW HAS PLAN FIXES — architecture is acceptable, but implementation should not start until the CLI/config/test mismatches below are corrected.
+
+Review findings:
+
+1. `publish_delta_backup.py` interface does not match the workflow. The plan says the CLI accepts `--config`, `--db-name`, and `--staging-run-id`, but the workflow calls only `--config-env` and `--work-dir`; either the script must scan staging objects from config, or the workflow must pass explicit db/run inputs.
+2. `DELTA_BACKUP_CONFIG` config shape is inconsistent. Task 6 says the local YAML may have `delta_backup:`, but the example uses `secrets.DELTA_BACKUP_CONFIG`; pick one shape so `apply-gh-actions-config.py --dry-run` can actually emit the expected secret.
+3. Tests cannot import `scripts.apply_gh_actions_config` while the existing file is named `scripts/apply-gh-actions-config.py`; either load it by file path in tests or add an importable wrapper module.
+4. Server-side config loading is unclear. The README command passes `--config config/backup-config.local.yml`, but the runtime dependency list only installs PyYAML for dev; either make runtime scripts consume JSON from `DELTA_BACKUP_CONFIG` or document/install PyYAML for server use.
