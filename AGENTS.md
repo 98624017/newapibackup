@@ -2,67 +2,86 @@
 
 ## Project Structure & Module Organization
 
-- `.github/workflows/backup-to-r2.yml`: the primary GitHub Actions workflow. It runs scheduled/manual PostgreSQL
-  backups, compresses dumps (`*.sql.gz`), and uploads them to Cloudflare R2 via the S3 API (optionally to a
-  secondary R2 account/bucket).
-- `.github/workflows/mirror-r2-full.yml`: mirrors server-side worker full backups from primary R2 to secondary R2
-  every 4 hours and fails when `full/latest.json` is stale.
-- `.github/keepalive/backup-heartbeat.json`: updated by the workflow (commit/push) to keep the repo active for
-  scheduled runs in public repos.
-- `scripts/zeabur_backup_worker.py`: server-side worker for `pg_dump | gzip -9` uploads to primary R2.
-- `scripts/mirror_r2_full.py`: GitHub Actions helper for primary-to-secondary R2 mirroring.
-- `config/backup-worker-config.example.json`: example JSON config for the server-side worker and mirror workflow.
+- `cmd/backup-worker/main.go`: container entrypoint. It loads environment variables, creates the R2 client, and runs
+  the backup loop.
+- `internal/backup/`: core backup package. It contains configuration parsing, scheduling, `pg_dump` execution,
+  gzip output, manifest generation, SHA256 hashing, and R2/S3 uploads.
+- `Dockerfile`: multi-stage Docker build for Zeabur deployment. The runtime image installs only CA certificates and
+  `postgresql-client`.
+- `.github/workflows/docker-publish.yml`: builds and pushes the Docker image to GitHub Container Registry on push or
+  manual dispatch.
+- `README.md`: deployment, environment variable, R2 object path, restore, and validation instructions.
+- `docs/superpowers/`: design and implementation planning notes; not required for runtime.
 - `.spec-workflow/`: templates used for spec/planning workflows; not required for runtime.
 
-Backups are uploaded under `s3://<bucket>/<YYYY>/<MM>/` (primary: `R2_BUCKET_NAME`, secondary:
-`R2_2_BUCKET_NAME`) with filenames like `<db>-backup-<YYYYMMDD-HHMMSS>.sql.gz`.
-Worker backups are uploaded under `s3://<bucket>/<prefix>/full/YYYY/MM/` plus `full/latest.json`.
+This project intentionally uses one Docker container per database. It does not keep the old Python worker,
+AWS CLI upload path, multi-database config, or GitHub Actions database backup workflow.
+
+Backups are uploaded under:
+
+```text
+s3://<bucket>/<prefix>/full/YYYY/MM/<backup-name>-backup-YYYYMMDD-HHMMSS.sql.gz
+s3://<bucket>/<prefix>/full/YYYY/MM/<backup-name>-backup-YYYYMMDD-HHMMSS.sql.gz.json
+s3://<bucket>/<prefix>/full/latest.json
+```
 
 ## Build, Test, and Development Commands
 
-This repository is workflow-driven (no app build). Recommended local validation:
-
-- `actionlint`: lint GitHub Actions workflow syntax and common mistakes.
-- `timeout 60s python -m pytest tests -q`: run the Python helper tests.
-- `act -W .github/workflows/backup-to-r2.yml`: optional local execution of the workflow (provide secrets via `-s`).
-
-For production validation, open a PR and verify the GitHub Actions run completes successfully.
+- `timeout 60s go test ./...`: run all Go tests.
+- `timeout 60s docker build -t newapi-backup-worker:test .`: build the deployment image.
+- `go test ./internal/backup -run TestLoadConfig -v`: run a focused test while iterating on config parsing.
 
 ## Coding Style & Naming Conventions
 
-- YAML: 2-space indentation; keep structure consistent (`on` → `jobs` → `steps`); prefer `kebab-case.yml` names.
-- Bash in `run:` blocks: quote variables, prefer strict modes (`set -euo pipefail`) when feasible, and keep steps
-  small and readable.
-- Secrets/env vars: use `UPPER_SNAKE_CASE` (e.g., `DB_BACKUP_CONFIG`, `R2_BUCKET_NAME`, `R2_2_BUCKET_NAME`).
+- Go: use `gofmt`; keep package APIs small and explicit.
+- Environment variables: use `UPPER_SNAKE_CASE`, matching README names exactly.
+- R2 object keys: keep `full/YYYY/MM/` layout stable because restore and `latest.json` depend on it.
+- Comments: add short comments only for complex or easy-to-misread logic.
 
 ## Testing Guidelines
 
-No unit-test suite is defined. Every change should at least pass `actionlint`, and ideally be exercised with `act`
-or a PR run.
+Every behavior change should have Go tests. Prefer testing the core package with fake dump/upload functions instead
+of touching a real database or R2 bucket. Before handing off changes, run:
+
+```bash
+timeout 60s go test ./...
+```
+
+When Docker is available, also run:
+
+```bash
+timeout 60s docker build -t newapi-backup-worker:test .
+```
 
 ## Commit & Pull Request Guidelines
 
-Commit history commonly uses a typed prefix with a colon (e.g., `feat: ...`, `Fix: ...`, `Debug: ...`). Prefer a
-consistent Conventional Commits style (`feat:`, `fix:`, `chore:`) and keep messages imperative.
+Commit history commonly uses a typed prefix with a colon (e.g., `feat: ...`, `fix: ...`, `chore: ...`). Keep messages
+imperative and focused.
 
-PRs should include: intent, scope, validation notes (link to a workflow run), and any secret/config changes. Attach
-redacted logs if useful.
+PRs should include intent, scope, validation notes, and any environment variable changes. Attach redacted logs if
+useful.
 
 ## Security & Configuration Tips
 
-Never commit credentials or database URLs. Configure GitHub Secrets used by the workflow:
+Never commit credentials or database URLs. Configure these as Zeabur environment variables:
 
-- `BACKUP_WORKER_CONFIG`: JSON object containing `backup_databases` and `r2_targets` for worker/mirror backups.
-- `DB_BACKUP_CONFIG`: JSON array like `[{"name":"prod","url":"postgres://...","targets":"both"}]` (per-item
-  `targets` is optional and overrides the default upload target)
-- Primary R2: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`
-- Secondary R2 (optional): `R2_2_ACCESS_KEY_ID`, `R2_2_SECRET_ACCESS_KEY`, `R2_2_ACCOUNT_ID`, `R2_2_BUCKET_NAME`
-- Upload selector (optional): set `R2_UPLOAD_TARGETS` to `primary`, `secondary`, or `both` (prefer Actions
-  Variables; Secrets also supported). If unset, the workflow defaults to `both` when secondary secrets are fully
-  configured, otherwise `primary`.
+```text
+DATABASE_URL
+R2_ACCOUNT_ID
+R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY
+R2_BUCKET_NAME
+```
 
-Avoid printing secrets; keep debug output minimal and redact connection strings in logs and PR descriptions.
+Optional variables:
 
-For local, repeatable setup, copy `config/backup-config.example.yml` to `config/backup-config.local.yml` (gitignored)
-and apply it via `python scripts/apply-gh-actions-config.py --config config/backup-config.local.yml` (use
-`--dry-run` first).
+```text
+BACKUP_NAME
+BACKUP_INTERVAL_SECONDS
+BACKUP_ON_START
+R2_PREFIX
+BACKUP_STATE_DIR
+```
+
+Avoid printing secrets. Logs may include backup object names, sizes, and hashes, but must not include `DATABASE_URL`
+or R2 secret values.

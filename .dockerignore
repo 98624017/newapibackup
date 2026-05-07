@@ -1,0 +1,11 @@
+.git
+.github
+.pytest_cache
+.spec-workflow
+docs
+tests
+config/*.local.*
+*.sql.gz
+__pycache__
+*.pyc
+backup-worker-state
