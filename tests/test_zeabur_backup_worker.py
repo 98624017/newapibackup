@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from scripts.zeabur_backup_worker import (
     backup_database,
     build_backup_key,
@@ -155,3 +157,40 @@ def test_main_db_name_only_backs_up_selected_database(tmp_path, monkeypatch):
 
     assert main() == 0
     assert backed_up == ["prod-b"]
+
+
+def test_upload_failure_cleans_local_temp_files(tmp_path, monkeypatch):
+    def fake_run_cmd(cmd):
+        output_path = cmd[-1]
+        with open(output_path, "wb") as fh:
+            fh.write(b"backup")
+
+    monkeypatch.setenv("PROD_A_DATABASE_URL", "postgres://example")
+    monkeypatch.setenv("R2_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "secret")
+    monkeypatch.setenv("R2_BUCKET", "bucket")
+    monkeypatch.setattr("scripts.zeabur_backup_worker.run_cmd", fake_run_cmd)
+    monkeypatch.setattr(
+        "scripts.zeabur_backup_worker.upload_file",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        backup_database(
+            db_config={"name": "prod-a", "url_env": "PROD_A_DATABASE_URL", "primary_target": "r2-primary"},
+            r2_targets={
+                "r2-primary": {
+                    "account_env": "R2_ACCOUNT_ID",
+                    "access_key_env": "R2_ACCESS_KEY_ID",
+                    "secret_key_env": "R2_SECRET_ACCESS_KEY",
+                    "bucket_env": "R2_BUCKET",
+                    "prefix": "prod-a/",
+                }
+            },
+            state_root=tmp_path,
+            created_at=dt.datetime(2026, 5, 7, 14, 30, tzinfo=dt.timezone.utc),
+            dry_run=False,
+        )
+
+    assert list((tmp_path / "prod-a").glob("*")) == []

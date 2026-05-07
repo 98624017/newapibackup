@@ -99,30 +99,32 @@ def backup_database(
     object_key = target_from_config(primary_target, r2_targets).object_key(backup_key)
     local_backup = state_dir / Path(backup_key).name
 
-    run_cmd(pg_dump_command(db_url, str(local_backup)))
-    backup_sha256 = sha256_file(local_backup)
-    manifest = build_manifest(
-        db_name=db_name,
-        created_at=created_at,
-        object_key=object_key,
-        sha256=backup_sha256,
-        size=local_backup.stat().st_size,
-    )
     manifest_path = state_dir / f"{local_backup.name}.json"
     latest_path = state_dir / "latest.json"
-    dump_json(manifest_path, manifest)
-    dump_json(latest_path, manifest)
+    try:
+        run_cmd(pg_dump_command(db_url, str(local_backup)))
+        backup_sha256 = sha256_file(local_backup)
+        manifest = build_manifest(
+            db_name,
+            created_at,
+            object_key,
+            backup_sha256,
+            local_backup.stat().st_size,
+        )
+        dump_json(manifest_path, manifest)
+        dump_json(latest_path, manifest)
 
-    if not dry_run:
-        target = target_from_config(primary_target, r2_targets)
-        upload_file(local_backup, target, backup_key)
-        upload_file(manifest_path, target, f"{backup_key}.json")
-        upload_file(latest_path, target, "full/latest.json")
+        if not dry_run:
+            target = target_from_config(primary_target, r2_targets)
+            upload_file(local_backup, target, backup_key)
+            upload_file(manifest_path, target, f"{backup_key}.json")
+            upload_file(latest_path, target, "full/latest.json")
 
-    local_backup.unlink(missing_ok=True)
-    manifest_path.unlink(missing_ok=True)
-    latest_path.unlink(missing_ok=True)
-    return manifest
+        return manifest
+    finally:
+        local_backup.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
+        latest_path.unlink(missing_ok=True)
 
 
 def main() -> int:
