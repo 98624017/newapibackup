@@ -30,7 +30,6 @@ def pg_dump_command(db_url: str, output_path: str) -> list[str]:
 
 
 def build_manifest(
-    *,
     db_name: str,
     created_at: dt.datetime,
     object_key: str,
@@ -122,6 +121,7 @@ def backup_database(
 
     local_backup.unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
+    latest_path.unlink(missing_ok=True)
     return manifest
 
 

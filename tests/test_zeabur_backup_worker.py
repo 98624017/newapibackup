@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 from scripts.zeabur_backup_worker import (
     backup_database,
     build_backup_key,
     build_manifest,
+    main,
     pg_dump_command,
     select_databases,
 )
@@ -36,11 +36,11 @@ def test_pg_dump_command_uses_plain_clean_dump():
 def test_build_manifest_records_object_hash_and_size():
     created_at = dt.datetime(2026, 5, 7, 14, 30, tzinfo=dt.timezone.utc)
     manifest = build_manifest(
-        db_name="prod-a",
-        created_at=created_at,
-        object_key="prod-a/full/2026/05/prod-a-backup-20260507-143000.sql.gz",
-        sha256="abc",
-        size=18,
+        "prod-a",
+        created_at,
+        "prod-a/full/2026/05/prod-a-backup-20260507-143000.sql.gz",
+        "abc",
+        18,
     )
 
     assert manifest["db"] == "prod-a"
@@ -123,5 +123,35 @@ def test_upload_order_is_backup_manifest_latest(tmp_path, monkeypatch):
         "full/2026/05/prod-a-backup-20260507-143000.sql.gz.json",
         "full/latest.json",
     ]
-    latest = json.loads((tmp_path / "prod-a" / "latest.json").read_text(encoding="utf-8"))
-    assert latest["object"] == "prod-a/full/2026/05/prod-a-backup-20260507-143000.sql.gz"
+    assert not (tmp_path / "prod-a" / "latest.json").exists()
+
+
+def test_main_db_name_only_backs_up_selected_database(tmp_path, monkeypatch):
+    backed_up: list[str] = []
+    config = {
+        "backup_databases": [
+            {"name": "prod-a", "url_env": "PROD_A_DATABASE_URL", "primary_target": "r2-primary"},
+            {"name": "prod-b", "url_env": "PROD_B_DATABASE_URL", "primary_target": "r2-primary"},
+        ],
+        "r2_targets": {
+            "r2-primary": {
+                "account_env": "R2_ACCOUNT_ID",
+                "access_key_env": "R2_ACCESS_KEY_ID",
+                "secret_key_env": "R2_SECRET_ACCESS_KEY",
+                "bucket_env": "R2_BUCKET",
+                "prefix": "backups/",
+            }
+        },
+    }
+
+    monkeypatch.setattr("sys.argv", ["zeabur_backup_worker.py", "--db-name", "prod-b", "--state-root", str(tmp_path)])
+    monkeypatch.setattr("scripts.zeabur_backup_worker.load_config_from_env", lambda env_name: config)
+
+    def fake_backup_database(*, db_config, **kwargs):
+        backed_up.append(db_config["name"])
+        return {"object": db_config["name"], "size": 1}
+
+    monkeypatch.setattr("scripts.zeabur_backup_worker.backup_database", fake_backup_database)
+
+    assert main() == 0
+    assert backed_up == ["prod-b"]
