@@ -21,14 +21,16 @@
 容器启动后会：
 
 1. 读取环境变量。
-2. 执行 `pg_dump`。
-3. 用 gzip 压缩 dump 数据。
+2. 执行 `pg_dump`，统一输出 UTF-8，确保非 UTF-8 数据库中的 JSON 也能正确过滤。
+3. 从 dump 流中移除 `public.logs.other` JSON 的顶层 `po` 字段，再用 gzip 压缩。
 4. 上传 `.sql.gz` 到 R2。
 5. 上传同名 manifest JSON。
 6. 更新 `full/latest.json`。
 7. 按 `BACKUP_INTERVAL_SECONDS` 进入下一轮。
 
 默认启动后立即备份一次，之后每 12 小时备份一次。
+
+默认过滤只发生在导出流中，不修改生产数据库的原始内容。所有日志行、`other` 的其他 JSON 字段，以及 `channels.param_override` 的实际配置都会保留。影响仅限备份中的历史参数覆盖审计快照；恢复格式和命令不变，恢复后产生的新日志仍会生成 `po`。
 
 ## 镜像
 
@@ -152,6 +154,7 @@ s3://xinbaoapi/newapi/full/latest.json
   "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "size": 16984003,
   "format": "plain sql gzip",
+  "excluded_fields": ["public.logs.other.po"],
   "pg_dump": {
     "format": "plain",
     "no_owner": true,
@@ -162,7 +165,7 @@ s3://xinbaoapi/newapi/full/latest.json
 }
 ```
 
-可以用 `sha256` 和 `size` 校验下载后的备份文件。
+`sha256` 和 `size` 对应过滤后最终上传的 `.sql.gz` 文件，可用于校验下载后的备份。`excluded_fields` 列出备份省略的字段；旧备份可能不包含此可选字段。
 
 ## 本地运行
 
@@ -261,7 +264,7 @@ gzip -dc backup.sql.gz | psql "$RESTORE_URL"
 `pg_dump` 使用 plain SQL，并带有：
 
 ```text
---format=plain --no-owner --no-acl --clean --if-exists
+--format=plain --encoding=UTF8 --no-owner --no-acl --clean --if-exists
 ```
 
 这意味着恢复脚本会尝试清理已存在对象。不要直接对生产库执行恢复，除非已经确认目标库就是要被覆盖。
@@ -341,6 +344,26 @@ timeout 60s go test ./...
 timeout 60s docker build -t newapi-backup-worker:test .
 timeout 60s docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest .github/workflows/docker-publish.yml
 ```
+
+原生 PostgreSQL 恢复测试默认跳过。需要验证真实 `pg_dump` → 过滤 → gzip → `psql` 恢复时，先启动无网络、无生产数据的临时容器：
+
+```bash
+docker run --rm -d --name newapibackup-test-restore \
+  --network none --tmpfs /var/lib/postgresql/data \
+  --label newapibackup.restore-test=true \
+  -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine
+docker exec newapibackup-test-restore pg_isready -U postgres
+```
+
+等 `pg_isready` 显示 `accepting connections` 后运行：
+
+```bash
+BACKUP_TEST_POSTGRES_CONTAINER=newapibackup-test-restore \
+  timeout 60s go test ./internal/backup -run '^TestDumpPostgresRestoresWithPostgres$' -count=1 -v
+docker stop newapibackup-test-restore
+```
+
+测试仅在明确指定且带有上述标签的容器内创建和清理 UTF8、LATIN1 fixture 数据库，验证两种数据库编码下结构、行数、序列、额度、其他 JSON 和渠道参数配置保留，以及只移除顶层 `po`。
 
 ## 项目结构
 

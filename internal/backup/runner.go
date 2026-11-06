@@ -65,7 +65,7 @@ func RunOnce(ctx context.Context, cfg Config, now time.Time, dumper Dumper, uplo
 }
 
 func DumpPostgres(ctx context.Context, databaseURL string, outputPath string) error {
-	cmd := exec.CommandContext(ctx, "pg_dump", databaseURL, "--format=plain", "--no-owner", "--no-acl", "--clean", "--if-exists")
+	cmd := exec.CommandContext(ctx, "pg_dump", databaseURL, "--format=plain", "--encoding=UTF8", "--no-owner", "--no-acl", "--clean", "--if-exists")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -84,7 +84,8 @@ func DumpPostgres(ctx context.Context, databaseURL string, outputPath string) er
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if _, err := io.Copy(gzipWriter, stdout); err != nil {
+	if err := filterDump(gzipWriter, stdout); err != nil {
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return err
 	}
@@ -95,7 +96,7 @@ func DumpPostgres(ctx context.Context, databaseURL string, outputPath string) er
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("pg_dump failed: %w", err)
 	}
-	return nil
+	return file.Close()
 }
 
 func cleanup(paths ...string) {
